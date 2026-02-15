@@ -13,6 +13,28 @@ public class Master {
     private final ConcurrentHashMap<String, TaskInfo> tasks = new ConcurrentHashMap<>();
     private final BlockingQueue<TaskInfo> pendingTasks = new LinkedBlockingQueue<>();
     private volatile boolean running = true;
+    private final String masterPort = System.getenv().getOrDefault("MASTER_PORT", "5000");
+
+    public Object remoteCall(String method, Object... args) {
+        if ("coordinate".equals(method) && args.length >= 3) {
+            return coordinate((String)args[0], (int[][])args[1], (int)args[2]);
+        }
+        return null;
+    }
+
+    public void recoverFromFailure(String workerId) {
+        WorkerConnection failed = workers.get(workerId);
+        if (failed != null) {
+            failed.active = false;
+            for (TaskInfo task : tasks.values()) {
+                if (!task.completed && workerId.equals(task.assignedWorker)) {
+                    task.assignedWorker = null;
+                    task.assignedTime = 0;
+                    pendingTasks.offer(task);
+                }
+            }
+        }
+    }
 
     static class WorkerConnection {
         Socket socket;
@@ -65,8 +87,9 @@ public class Master {
 
     public Object coordinate(String operation, int[][] data, int workerCount) {
         try {
-            listen(5000 + (int)(Math.random() * 1000));
-            
+            int port = Integer.parseInt(masterPort) + (int)(Math.random() * 1000);
+            listen(port);
+
             long deadline = System.currentTimeMillis() + 30000;
             while (workers.size() < workerCount && System.currentTimeMillis() < deadline) {
                 Thread.sleep(100);
@@ -82,12 +105,14 @@ public class Master {
             int tasksCreated = Math.max(effectiveWorkers * 3, Math.min(rows, 20));
             int rowsPerTask = Math.max(1, rows / tasksCreated);
 
+            CountDownLatch parallelStart = new CountDownLatch(1);
+
             for (int i = 0; i < tasksCreated; i++) {
                 int startRow = i * rowsPerTask;
                 int endRow = (i == tasksCreated - 1) ? rows : Math.min((i + 1) * rowsPerTask, rows);
-                
+
                 if (startRow >= rows) break;
-                
+
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 DataOutputStream dos = new DataOutputStream(baos);
                 dos.writeInt(startRow);
@@ -106,8 +131,17 @@ public class Master {
             }
 
             for (int i = 0; i < effectiveWorkers; i++) {
-                systemThreads.execute(this::distributeTasks);
+                systemThreads.execute(() -> {
+                    try {
+                        parallelStart.await();
+                        distributeTasks();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
             }
+
+            parallelStart.countDown();
 
             systemThreads.execute(() -> {
                 while (running) {
@@ -204,7 +238,16 @@ public class Master {
                 ack.type = "ACK";
                 ack.sender = "master";
                 ack.timestamp = System.currentTimeMillis();
-                ack.payload = new byte[0];
+                ack.messageType = "HANDSHAKE_ACK";
+
+                ByteArrayOutputStream capBaos = new ByteArrayOutputStream();
+                DataOutputStream capDos = new DataOutputStream(capBaos);
+                capDos.writeUTF("CAPABILITY:MATRIX_OPS");
+                capDos.writeInt(tasks.size());
+                capDos.writeInt(workers.size());
+                capDos.flush();
+                ack.payload = capBaos.toByteArray();
+
                 conn.sendMessage(ack);
 
                 systemThreads.execute(() -> workerListener(conn));
@@ -218,7 +261,7 @@ public class Master {
         try {
             while (running && conn.active) {
                 Message msg = conn.receiveMessage();
-                
+
                 if ("RESULT".equals(msg.type)) {
                     String taskId = new String(msg.payload, 0, msg.payload.length);
                     int separatorIdx = taskId.indexOf('|');
@@ -226,7 +269,7 @@ public class Master {
                         String tid = taskId.substring(0, separatorIdx);
                         byte[] resultData = new byte[msg.payload.length - separatorIdx - 1];
                         System.arraycopy(msg.payload, separatorIdx + 1, resultData, 0, resultData.length);
-                        
+
                         TaskInfo task = tasks.get(tid);
                         if (task != null) {
                             task.result = resultData;
@@ -262,7 +305,7 @@ public class Master {
                     taskMsg.type = "TASK";
                     taskMsg.sender = "master";
                     taskMsg.timestamp = System.currentTimeMillis();
-                    
+
                     ByteArrayOutputStream baos = new ByteArrayOutputStream();
                     DataOutputStream dos = new DataOutputStream(baos);
                     byte[] tidBytes = task.taskId.getBytes();
@@ -296,13 +339,13 @@ public class Master {
     private int lastWorkerIndex = 0;
     private synchronized WorkerConnection selectWorker() {
         if (workers.isEmpty()) return null;
-        
+
         WorkerConnection[] activeWorkers = workers.values().stream()
-            .filter(w -> w.active)
-            .toArray(WorkerConnection[]::new);
-        
+                .filter(w -> w.active)
+                .toArray(WorkerConnection[]::new);
+
         if (activeWorkers.length == 0) return null;
-        
+
         lastWorkerIndex = (lastWorkerIndex + 1) % activeWorkers.length;
         return activeWorkers[lastWorkerIndex];
     }
@@ -313,7 +356,7 @@ public class Master {
             if (worker.active && (now - worker.lastHeartbeat > 5000)) {
                 worker.active = false;
                 workers.remove(worker.workerId);
-                
+
                 for (TaskInfo task : tasks.values()) {
                     if (!task.completed && worker.workerId.equals(task.assignedWorker)) {
                         task.assignedWorker = null;
@@ -321,13 +364,13 @@ public class Master {
                         pendingTasks.offer(task);
                     }
                 }
-                
+
                 try {
                     worker.socket.close();
                 } catch (IOException ignored) {}
             }
         }
-        
+
         for (TaskInfo task : tasks.values()) {
             if (!task.completed && task.assignedWorker != null && task.assignedTime > 0) {
                 long elapsed = now - task.assignedTime;
@@ -350,7 +393,7 @@ public class Master {
                 serverSocket.close();
             }
         } catch (IOException ignored) {}
-        
+
         for (WorkerConnection worker : workers.values()) {
             try {
                 worker.socket.close();

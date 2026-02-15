@@ -12,12 +12,13 @@ public class Worker {
     private DataInputStream in;
     private String workerId;
     private final ExecutorService executor = Executors.newCachedThreadPool();
-    private volatile boolean running = true;
+    private volatile boolean running = false;
 
     public void joinCluster(String masterHost, int port) {
         try {
             workerId = "worker_" + UUID.randomUUID().toString().substring(0, 8);
             socket = new Socket(masterHost, port);
+            socket.setSoTimeout(5000);
             out = new DataOutputStream(socket.getOutputStream());
             in = new DataInputStream(socket.getInputStream());
 
@@ -27,29 +28,43 @@ public class Worker {
             joinMsg.type = "JOIN";
             joinMsg.sender = workerId;
             joinMsg.timestamp = System.currentTimeMillis();
-            joinMsg.payload = new byte[0];
+            joinMsg.messageType = "HANDSHAKE_REQUEST";
+
+            ByteArrayOutputStream capBaos = new ByteArrayOutputStream();
+            DataOutputStream capDos = new DataOutputStream(capBaos);
+            capDos.writeUTF("CAPABILITY:COMPUTE");
+            capDos.writeInt(Runtime.getRuntime().availableProcessors());
+            capDos.flush();
+            joinMsg.payload = capBaos.toByteArray();
 
             sendMessage(joinMsg);
 
             Message ackMsg = receiveMessage();
             if (ackMsg != null && "ACK".equals(ackMsg.type)) {
+                running = true;
                 executor.execute(this::listenForTasks);
                 executor.execute(this::sendHeartbeats);
             }
 
         } catch (IOException e) {
-            e.printStackTrace();
+            running = false;
         }
     }
 
     public void execute() {
-        while (running) {
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                break;
-            }
+        if (!running || socket == null || !socket.isConnected()) {
+            return;
         }
+
+        executor.execute(() -> {
+            while (running) {
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        });
     }
 
     private void listenForTasks() {
