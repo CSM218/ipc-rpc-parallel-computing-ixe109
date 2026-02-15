@@ -23,7 +23,7 @@ public class Worker {
             in = new DataInputStream(socket.getInputStream());
 
             Message joinMsg = new Message();
-            joinMsg.magic = "CSM218";
+            joinMsg.magic = Message.PROTOCOL_MAGIC;
             joinMsg.version = 1;
             joinMsg.type = "JOIN";
             joinMsg.sender = workerId;
@@ -128,7 +128,7 @@ public class Worker {
             finalBaos.write(resultBaos.toByteArray());
 
             Message resultMsg = new Message();
-            resultMsg.magic = "CSM218";
+            resultMsg.magic = Message.PROTOCOL_MAGIC;
             resultMsg.version = 1;
             resultMsg.type = "RESULT";
             resultMsg.sender = workerId;
@@ -171,7 +171,7 @@ public class Worker {
             try {
                 Thread.sleep(800);
                 Message hb = new Message();
-                hb.magic = "CSM218";
+                hb.magic = Message.PROTOCOL_MAGIC;
                 hb.version = 1;
                 hb.type = "HEARTBEAT";
                 hb.sender = workerId;

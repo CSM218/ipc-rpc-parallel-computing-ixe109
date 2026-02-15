@@ -1,9 +1,11 @@
 package pdc;
 
 import java.io.*;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 
 public class Message {
+    public static final String PROTOCOL_MAGIC = "CSM218";
     public String magic;
     public int version;
     public String type;
@@ -15,6 +17,20 @@ public class Message {
 
     public Message() {
         this.studentId = System.getenv().getOrDefault("STUDENT_ID", "default_student");
+        this.magic = PROTOCOL_MAGIC;
+    }
+
+    public boolean validate() {
+        if (magic == null || !magic.equals(PROTOCOL_MAGIC)) {
+            return false;
+        }
+        if (version < 1) {
+            return false;
+        }
+        if (type == null || type.isEmpty()) {
+            return false;
+        }
+        return true;
     }
 
     public byte[] pack() {
@@ -22,7 +38,7 @@ public class Message {
         DataOutputStream dos = new DataOutputStream(baos);
 
         try {
-            byte[] magicBytes = (magic != null ? magic : "").getBytes(StandardCharsets.UTF_8);
+            byte[] magicBytes = (magic != null ? magic : PROTOCOL_MAGIC).getBytes(StandardCharsets.UTF_8);
             byte[] typeBytes = (type != null ? type : "").getBytes(StandardCharsets.UTF_8);
             byte[] senderBytes = (sender != null ? sender : "").getBytes(StandardCharsets.UTF_8);
             byte[] payloadBytes = (payload != null ? payload : new byte[0]);
@@ -42,7 +58,13 @@ public class Message {
             dos.writeInt(studentIdBytes.length);
             dos.write(studentIdBytes);
             dos.writeInt(payloadBytes.length);
-            dos.write(payloadBytes);
+
+            int totalWritten = 0;
+            while (totalWritten < payloadBytes.length) {
+                int toWrite = Math.min(8192, payloadBytes.length - totalWritten);
+                dos.write(payloadBytes, totalWritten, toWrite);
+                totalWritten += toWrite;
+            }
 
             dos.flush();
             return baos.toByteArray();
@@ -88,7 +110,13 @@ public class Message {
 
             int payloadLen = dis.readInt();
             msg.payload = new byte[payloadLen];
-            dis.readFully(msg.payload);
+
+            int totalRead = 0;
+            while (totalRead < payloadLen) {
+                int bytesRead = dis.read(msg.payload, totalRead, payloadLen - totalRead);
+                if (bytesRead == -1) break;
+                totalRead += bytesRead;
+            }
 
             return msg;
         } catch (IOException e) {

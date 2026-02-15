@@ -14,6 +14,7 @@ public class Master {
     private final BlockingQueue<TaskInfo> pendingTasks = new LinkedBlockingQueue<>();
     private volatile boolean running = true;
     private final String masterPort = System.getenv().getOrDefault("MASTER_PORT", "5000");
+    private final int maxRetryAttempts = 3;
 
     public Object remoteCall(String method, Object... args) {
         if ("coordinate".equals(method) && args.length >= 3) {
@@ -26,10 +27,17 @@ public class Master {
         WorkerConnection failed = workers.get(workerId);
         if (failed != null) {
             failed.active = false;
-            for (TaskInfo task : tasks.values()) {
-                if (!task.completed && workerId.equals(task.assignedWorker)) {
-                    task.assignedWorker = null;
-                    task.assignedTime = 0;
+            reassignTasksFromWorker(workerId);
+        }
+    }
+
+    private void reassignTasksFromWorker(String workerId) {
+        for (TaskInfo task : tasks.values()) {
+            if (!task.completed && workerId.equals(task.assignedWorker)) {
+                task.assignedWorker = null;
+                task.assignedTime = 0;
+                task.retryCount++;
+                if (task.retryCount < maxRetryAttempts) {
                     pendingTasks.offer(task);
                 }
             }
@@ -76,12 +84,14 @@ public class Master {
         long assignedTime;
         boolean completed;
         byte[] result;
+        int retryCount;
 
         TaskInfo(String taskId, String operation, byte[] data) {
             this.taskId = taskId;
             this.operation = operation;
             this.data = data;
             this.completed = false;
+            this.retryCount = 0;
         }
     }
 
@@ -233,7 +243,7 @@ public class Master {
                 workers.put(workerId, conn);
 
                 Message ack = new Message();
-                ack.magic = "CSM218";
+                ack.magic = Message.PROTOCOL_MAGIC;
                 ack.version = 1;
                 ack.type = "ACK";
                 ack.sender = "master";
@@ -300,7 +310,7 @@ public class Master {
                 WorkerConnection worker = selectWorker();
                 if (worker != null) {
                     Message taskMsg = new Message();
-                    taskMsg.magic = "CSM218";
+                    taskMsg.magic = Message.PROTOCOL_MAGIC;
                     taskMsg.version = 1;
                     taskMsg.type = "TASK";
                     taskMsg.sender = "master";
@@ -356,14 +366,7 @@ public class Master {
             if (worker.active && (now - worker.lastHeartbeat > 5000)) {
                 worker.active = false;
                 workers.remove(worker.workerId);
-
-                for (TaskInfo task : tasks.values()) {
-                    if (!task.completed && worker.workerId.equals(task.assignedWorker)) {
-                        task.assignedWorker = null;
-                        task.assignedTime = 0;
-                        pendingTasks.offer(task);
-                    }
-                }
+                reassignTasksFromWorker(worker.workerId);
 
                 try {
                     worker.socket.close();
@@ -379,7 +382,10 @@ public class Master {
                     if (worker == null || !worker.active) {
                         task.assignedWorker = null;
                         task.assignedTime = 0;
-                        pendingTasks.offer(task);
+                        task.retryCount++;
+                        if (task.retryCount < maxRetryAttempts) {
+                            pendingTasks.offer(task);
+                        }
                     }
                 }
             }
